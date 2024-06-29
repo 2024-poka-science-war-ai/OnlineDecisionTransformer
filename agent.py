@@ -34,12 +34,12 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
     def __init__(self, obs_space):
         super().__init__()
         self.s_dim = 6
-        self.a_dim = 45
+        self.a_dim = 28
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = model.Decision_transformer(s_dim=self.s_dim, a_dim=self.a_dim, hidden_dim=64, K=self.K, max_timestep=self.max_timestep).to(self.device)
         self.register_buffer(name='lmbda', tensor=torch.tensor([1]), persistent=True)
         self.character = enums.Character.FOX
-        self.action_space = ActionSpace()
+        self.action_space = MyActionSpace()
         self.observation_space = obs_space
 
         #hyperparameters
@@ -56,9 +56,9 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
         self.traj_buffer = TrajBuffer(K = self.K, buffer_size = self.buffer_size, a_dim=self.a_dim)
         self.optimizer = torch.optim.Adam(params=self.model.parameters())    
            
-
         #reset after each episodes
         self.timestep = 0
+        self.last_r = None
         self.register_buffer(name='R', persistent=False) #temporal buffers
         self.register_buffer(name='s', persistent=False) #to contain R, s, a of current episode
         self.register_buffer(name='a', persistent=False)
@@ -69,6 +69,7 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
         obs, reward, done, info = observation
         self.push_R(reward)
         self.push_s(obs)
+        self.last_r = reward
         R, s, a= self.get_Rsa_seq()
         t = (torch.arange(self.timestep-self.K+1, self.timestep) if self.timestep-self.K>0 else torch.arange(0, self.K)).unsqueeze(0).to(self.device)
         _, _, a_preds = self.model.forward(t=t, R=R, s=s, a=a)
@@ -92,6 +93,7 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
     def end_ep(self):
         self.update_traj_buffer()
         self.timestep = 0
+        self.last_r = None
         self.buffers()['R'] = None
         self.buffers()['s'] = None
         self.buffers()['a'] = None
@@ -108,20 +110,13 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
         return J + lmbda * H_, H_
 
 
-
     def update_traj_buffer(self):
-        R = self.buffers()['R'].clone().detach().numpy()
-        s = self.buffers()['s'].clone().detach().numpy()
+        R = self.buffers()['R'].clone().detach()
+        s = self.buffers()['s'].clone().detach()
         a = self.buffers()['a'].clone().detach()
-        r = 0
-        for i in range(len(s)).reversed():
-            r += reward(s[i]) #self.observationspace.reward(state) 
-            R[i] = r #Hindsight Return Relabeling
-        R = torch.tensor(R)
-        s = torch.tensor(s)
+        R = R - R[-1] + torch.tensor([self.last_r]) #Hindsight return relabeling
         self.traj_buffer.push_traj(R, s, a)
         
-
 
     def push_R(self, r):
         if self.buffers()['R'] is None:
@@ -150,7 +145,6 @@ class OnlineDecisionTransformerAgent(Agent, nn.Module):
     
     def get_Rsa_seq(self):
         i = max(self.timestep - self.K + 1, 0)
-        t = self.add_padding(self.buffers()['t'][i:-1]).unsqueeze(0)
         R = self.add_padding(self.buffers()['R'][i:-1]).unsqueeze(0)
         s = self.add_padding(self.buffers()['s'][i:-1]).unsqueeze(0)
         if self.buffers()['a'] is not None:

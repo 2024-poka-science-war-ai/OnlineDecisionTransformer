@@ -68,7 +68,8 @@ class DolphinConfig:
         else:
             # check for updates? might be nice to preserve the current install
             # in case things break. 
-            print(f"Found melee-env installation in {self.slippi_path.parents[0]}")
+            # print(f"Found melee-env installation in {self.slippi_path.parents[0]}")
+            pass
 
 
     def use_render_interface(self, interface="opengl"):

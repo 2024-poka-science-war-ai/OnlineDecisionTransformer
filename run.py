@@ -35,9 +35,6 @@ for episode in range(args.num_ep):
     while not done: 
         players[0].act(gamestate)
         players[1].act(gamestate)
-        
-        observation, r, done, info = obs_space(gamestate)
-        score += r
 
         gamestate, done = env.step()
     
