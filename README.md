@@ -1,5 +1,7 @@
-run.py: run and train policy gradient agent
+run.py : run
 
-arch_core: architecture of the agent
+model.py : decision transformer model
 
-you need a .iso file to run the game.
+agent.py : online decision transformer agent
+
+buffer.py : trajectory buffer for the agent
