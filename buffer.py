@@ -4,7 +4,8 @@ from torch.distributions.categorical import Categorical
 import random
 
 class TrajBuffer():
-    def __init__(self, K, buffer_size, a_dim):
+    def __init__(self, K, buffer_size, a_dim, device):
+        self.device = device
         self.K = K
         self.buffer_size = buffer_size
         self.a_dim = a_dim
@@ -25,14 +26,13 @@ class TrajBuffer():
             self.len_list = self.len_list[1:]
 
     def add_padding(self, seq, give_mask = False):
-        _, S, h = seq.shape
+        S, h = seq.shape
         if self.K - S > 0:
-            seq = torch.cat(seq, torch.zeros(1, self.K - S, h), dim=1)
-
+            seq = torch.cat((seq, torch.zeros(self.K - S, h)), dim=0)
         if give_mask:
-            mask = torch.zeros(self.K)
-            mask[self.S - 1:] = 1
-            return seq, mask
+            mask = torch.zeros((self.K,))
+            mask[S:] = 1
+            return seq, mask.unsqueeze(1)
         else:
             return seq
 
@@ -41,17 +41,21 @@ class TrajBuffer():
         R = []
         s  = []
         a = []
+        masks = []
         for _ in range(batch_size):
-            i = Categorical(self.len_list).sample(sample_shape=(1,)).item()
-            t = random() % (self.len_list[i] - self.K + 1)
-            t_ = t + self.K
-            T.append(torch.arange(t, t_).unsqueeze(0))
-            R.append(self.R[t : t_])
-            s.append(self.s[t : t_])
-            a.append(self.a[t : t_])
+            i = Categorical(torch.tensor(self.len_list)).sample(sample_shape=(1,)).item()
+            t = random.randrange(0, self.len_list[i])
+            t_ = min(t + self.K, self.len_list[i])
+            T.append(torch.arange(t, t + self.K))
+            R.append(self.add_padding(self.R[i][t : t_]).to(dtype=torch.float32))
+            s.append(self.add_padding(self.s[i][t : t_]).to(dtype=torch.float32))
+            action_seq, mask = self.add_padding(F.one_hot(self.a[i][t : t_], num_classes=self.a_dim).to(dtype=torch.float32), give_mask=True)
+            a.append(action_seq)
+            masks.append(mask)
 
-        for x in [T, R, s, a]:
-            x = torch.stack(x)
-        return (T, R, s, a)
+        traj = [T, R, s, a, masks]
+        for i in range(5):
+            traj[i] = torch.stack(traj[i]).to(self.device)
+        return traj
         
         

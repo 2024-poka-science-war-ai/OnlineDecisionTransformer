@@ -11,11 +11,10 @@ import numpy as np
 from tqdm import tqdm
 import random
 from melee_env.agents.util import ObservationSpace, ActionSpace
-import model
+from model import Decision_transformer
 from torch.distributions.categorical import Categorical
 from buffer import TrajBuffer
 
-from hyper_param import PARAMS
 class Agent(ABC):
     def __init__(self):
         self.agent_type = "AI"
@@ -30,125 +29,132 @@ class Agent(ABC):
     def act(self):
         pass
     
-class OnlineDecisionTransformerAgent(Agent, nn.Module):
+class OnlineDecisionTransformerAgent(Agent):
     def __init__(self, obs_space):
-        super().__init__()
-        self.s_dim = 6
+        super().__init__() #super().__init__() doesn't work??
+        #hyperparameters
+        self.s_dim = 37
         self.a_dim = 28
+        self.objective_R = 50
+        self.max_timestep = 32768
+        self.K = 128
+        self.buffer_size = 64
+        self.batch_size = 16
+        self.training_iter = 4
+        self.lmbda_lr = 0.001 
+        self.beta = 1
+
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = model.Decision_transformer(s_dim=self.s_dim, a_dim=self.a_dim, hidden_dim=64, K=self.K, max_timestep=self.max_timestep).to(self.device)
-        self.register_buffer(name='lmbda', tensor=torch.tensor([1]), persistent=True)
+        self.model = Decision_transformer(s_dim=self.s_dim, a_dim=self.a_dim, hidden_dim=64, K=self.K, max_timestep=self.max_timestep).to(self.device)
+        self.optimizer = torch.optim.Adam(params=self.model.parameters())
+        
         self.character = enums.Character.FOX
         self.action_space = MyActionSpace()
         self.observation_space = obs_space
-
-        #hyperparameters
-        self.objective_R = 1
-        self.max_timestep = 4096
-        self.K = 128
-        self.buffer_size = 32
-        self.batch_size = 16
-        self.training_iter = 8
-        self.lmbda_lr = 0.001 
-        self.beta = torch.tensor[1]
-
-        #buffer and optimizer
-        self.traj_buffer = TrajBuffer(K = self.K, buffer_size = self.buffer_size, a_dim=self.a_dim)
-        self.optimizer = torch.optim.Adam(params=self.model.parameters())    
-           
-        #reset after each episodes
+            
+        #buffers & temporal parameters
         self.timestep = 0
         self.last_r = None
-        self.register_buffer(name='R', persistent=False) #temporal buffers
-        self.register_buffer(name='s', persistent=False) #to contain R, s, a of current episode
-        self.register_buffer(name='a', persistent=False)
+        self.traj_buffer = TrajBuffer(K = self.K, buffer_size = self.buffer_size, a_dim=self.a_dim, device=self.device)
+        
+        #temporal buffers : reset after each episodes
+        self.temp_buffer = {'R' : None,
+                            's' : None,
+                            'a' : None }
+
+        #turn on eval mode during exploration
+        self.model.eval()
     
     @from_action_space
     @from_observation_space
-    def act(self, observation):
-        obs, reward, done, info = observation
+    def act(self, gamestate):
+        obs, reward, done, info = gamestate
         self.push_R(reward)
         self.push_s(obs)
         self.last_r = reward
         R, s, a= self.get_Rsa_seq()
-        t = (torch.arange(self.timestep-self.K+1, self.timestep) if self.timestep-self.K>0 else torch.arange(0, self.K)).unsqueeze(0).to(self.device)
+        t = (torch.arange(self.timestep-self.K+1, self.timestep + 1) if self.timestep-self.K>0 else torch.arange(0, self.K)).unsqueeze(0).to(device=self.device)
         _, _, a_preds = self.model.forward(t=t, R=R, s=s, a=a)
         self.timestep += 1
 
-        a_pred = Categorical(probs=a_preds[0, self.current_t]).sample()
+        a_pred = Categorical(probs=a_preds[0, min(self.K - 1, self.timestep)]).sample().detach()
         self.push_a(a_pred)
         return a_pred
         
     def train(self):
-        for _ in range(self.training_iter):
+        print("training...")
+        self.model.train()
+        for _ in tqdm(range(self.training_iter)):
             self.optimizer.zero_grad()
-            T, R, s, a= self.traj_buffer.get_trajs(self.batch_size)
+            T, R, s, a, masks = self.traj_buffer.get_trajs(self.batch_size)
             _, _, a_preds = self.model.forward(T, R, s, a)
-            lmbda = self.buffers()['lmbda']
-            L, dlmbda = self.lagrangian(a_preds, a, lmbda=lmbda) #to ensure its shannon entropy is larger than beta, a fixed const,
-            L.backward()                                         #we optimize Lagrangian associated with both loss fn and entropy.
+            L, dlmbda = self.lagrangian(a, a_preds, masks, lmbda=self.model.lmbda) #to ensure its shannon entropy is larger than beta, a fixed const,
+            L.backward() #we optimize Lagrangian associated with both loss fn and entropy.
             self.optimizer.step() #optimizing theta, parameters of the model
-            lmbda = max(lmbda + self.lmbda_lr * dlmbda, 0) #optimizing lmbda
+            self.model.lmbda = max(self.model.lmbda + self.lmbda_lr * dlmbda, 0) #optimizing lmbda
+            print("loss : ", L)
+        self.model.eval()
+        print("done!")
 
     def end_ep(self):
         self.update_traj_buffer()
         self.timestep = 0
         self.last_r = None
-        self.buffers()['R'] = None
-        self.buffers()['s'] = None
-        self.buffers()['a'] = None
+        for x in self.temp_buffer.keys():
+            self.temp_buffer[x] = None
 
 
     
-    def loss_fn(self, a, a_preds):
-        return nn.CrossEntropyLoss()(a, a_preds)
+    def loss_fn(self, a, a_preds, masks):
+        return torch.sum(- a * torch.log(a_preds) * (1 - masks))
 
-    def lagrangian(self, a_preds, a, lmbda):
-        J = self.loss_fn(a, a_preds)
-        H = torch.sum(Categorical(probs = a_preds).entropy() / self.K)
-        H_ = self.beta - H
-        return J + lmbda * H_, H_
+    def lagrangian(self, a, a_preds, masks, lmbda):
+        J = self.loss_fn(a, a_preds, masks) / self.K
+        H = torch.sum(Categorical(probs = a_preds).entropy()) / self.K
+        H_ = - H + self.beta
+        return J + lmbda * H_, H_.item()
 
 
     def update_traj_buffer(self):
-        R = self.buffers()['R'].clone().detach()
-        s = self.buffers()['s'].clone().detach()
-        a = self.buffers()['a'].clone().detach()
-        R = R - R[-1] + torch.tensor([self.last_r]) #Hindsight return relabeling
+        R = self.temp_buffer['R'].clone().to('cpu')
+        s = self.temp_buffer['s'].clone().to('cpu')        
+        a = self.temp_buffer['a'].clone().to('cpu')
+        R = R - R[-1] + self.last_r #Hindsight return relabeling
         self.traj_buffer.push_traj(R, s, a)
         
 
     def push_R(self, r):
-        if self.buffers()['R'] is None:
-            self.buffers()['R'] = torch.tensor([[self.objective_R]])
+        if self.temp_buffer['R'] is None:
+            self.temp_buffer['R'] = torch.tensor([[self.objective_R]]).to(self.device, dtype=torch.float32)
         else:
-            RtG = self.buffers()['R'][-1].item() - r
-            self.buffers()['R'] = torch.cat(self.buffer['R'], torch.tensor[[RtG]], dim=0)
+            RtG = self.temp_buffer['R'][-1].item() - r
+            self.temp_buffer['R'] = torch.cat((self.temp_buffer['R'], torch.tensor([[RtG]]).to(self.device, dtype=torch.float32)), dim=0)
     
     def push_s(self, s):
-        if self.buffers()['s'] is None:
-            self.buffers()['s'] = s.flatten(0,1).unsqueeze(0)
+        if self.temp_buffer['s'] is None:
+            s = torch.tensor(state_processor(s))
+            self.temp_buffer['s'] = s.unsqueeze(0).to(self.device, dtype=torch.float32)
         else:
-            self.buffers()['s'] = torch.cat(self.buffers['s'], s.flatten(0,1).unsqueeze(0), dim=0)
+            self.temp_buffer['s'] = torch.cat((self.temp_buffer['s'], torch.tensor(state_processor(s)).unsqueeze(0).to(self.device, dtype=torch.float32)), dim=0)
 
     def push_a(self, a):
-        if self.buffers()['a'] is None:
-            self.buffers()['a'] = a.unsqueeze(0)
+        if self.temp_buffer['a'] is None:
+            self.temp_buffer['a'] = a.unsqueeze(0).to(self.device)
         else:
-            self.buffers()['a'] = torch.cat(self.buffers()['a'], a.unsqueeze(0), dim=0)
+            self.temp_buffer['a'] = torch.cat((self.temp_buffer['a'], a.unsqueeze(0).to(self.device)), dim=0)
 
     def add_padding(self, seq):
-        _, T, h = seq.shape
+        T, h = seq.shape
         if self.K - T > 0:
-            seq = torch.cat(seq, torch.zeros(1, self.K - T, h), dim=1)
+            seq = torch.cat((seq, torch.zeros(self.K - T, h).to(self.device)), dim=0)
         return seq
     
     def get_Rsa_seq(self):
         i = max(self.timestep - self.K + 1, 0)
-        R = self.add_padding(self.buffers()['R'][i:-1]).unsqueeze(0)
-        s = self.add_padding(self.buffers()['s'][i:-1]).unsqueeze(0)
-        if self.buffers()['a'] is not None:
-            a = self.add_padding(F.one_hot(self.buffers()['a'][i - 1:-1], num_classes=self.a_dim)).unsqueeze(0)
+        R = self.add_padding(self.temp_buffer['R'][i:-1]).unsqueeze(0)
+        s = self.add_padding(self.temp_buffer['s'][i:-1]).unsqueeze(0)
+        if self.temp_buffer['a'] is not None:
+            a = self.add_padding(F.one_hot(self.temp_buffer['a'][i - 1:-1], num_classes=self.a_dim)).unsqueeze(0)
         else:
-            a = torch.zeros(1, self.K, self.a_dim).unsqueeze(0)
-        return R, s, a
+            a = torch.zeros(self.K, self.a_dim).unsqueeze(0).to(self.device)
+        return [x.to(dtype=torch.float32) for x in [R, s, a]]

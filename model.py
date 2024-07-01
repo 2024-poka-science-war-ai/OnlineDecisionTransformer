@@ -13,8 +13,6 @@ import random
 from melee_env.agents.util import ObservationSpace, ActionSpace
 import math
 
-from hyper_param import PARAMS
-
 class MaskedCausalAttention(nn.Module):
     def __init__(self, h_dim, max_T, n_heads, drop_p):
         super().__init__()
@@ -66,7 +64,7 @@ class MaskedCausalAttention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, h_dim, max_T, n_heads, drop_p):
+    def __init__(self, h_dim, max_T, n_heads, drop_p=0.05):
         super().__init__()
         self.attention = MaskedCausalAttention(h_dim, max_T, n_heads, drop_p)
         self.mlp = nn.Sequential(
@@ -88,15 +86,15 @@ class Block(nn.Module):
 
 class Decision_transformer(nn.Module):
     def __init__(self, s_dim, a_dim, hidden_dim, K, max_timestep): #the model will consider last K timesteps
-        super(Decision_transformer, self).__init__()
+        super().__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
         self.hidden_dim = hidden_dim
         self.K = K
-        self.embed_t = nn.Embedding(max_timestep, hidden_dim)
-        self.embed_R = nn.Linear(1, hidden_dim)
-        self.embed_s = nn.Linear(s_dim, hidden_dim)
-        self.embed_a = nn.Linear(a_dim, hidden_dim)
+        self.embed_t = nn.Embedding(max_timestep, hidden_dim, dtype=torch.float32)
+        self.embed_R = nn.Linear(1, hidden_dim, dtype=torch.float32)
+        self.embed_s = nn.Linear(s_dim, hidden_dim, dtype=torch.float32)
+        self.embed_a = nn.Linear(a_dim, hidden_dim, dtype=torch.float32)
         self.embed_layernorm = nn.LayerNorm(hidden_dim)
         self.transformer = nn.Sequential(
             Block(hidden_dim, 3 * K, n_heads=4),
@@ -106,7 +104,11 @@ class Decision_transformer(nn.Module):
         )
         self.predict_R = nn.Linear(hidden_dim, 1)
         self.predict_s = nn.Linear(hidden_dim, s_dim)
-        self.predict_a = nn.Softmax(nn.Linear(hidden_dim, a_dim)) #original paper doesn't apply softmax()
+        self.predict_a = nn.Sequential(
+            nn.Linear(hidden_dim, a_dim),
+            nn.Softmax()
+        ) #original paper doesn't apply softmax()
+        self.lmbda = 1
 
     def forward(self, t, R, s, a): #(Batch, Seq, *)
         B, T, _ = s.shape
@@ -117,7 +119,7 @@ class Decision_transformer(nn.Module):
 
         h = torch.stack(
             (R_embedding, s_embedding, a_embedding), dim=1
-        ).permute(0, 2, 1, 3).reshape(B, 3 * T, self.h_dim)
+        ).permute(0, 2, 1, 3).reshape(B, 3 * T, self.hidden_dim)
         h = self.embed_layernorm(h)
         h = self.transformer(h)
 
@@ -125,7 +127,7 @@ class Decision_transformer(nn.Module):
         # h[:, 0, t] is conditioned on r_0, s_0, a_0 ... r_t
         # h[:, 1, t] is conditioned on r_0, s_0, a_0 ... r_t, s_t
         # h[:, 2, t] is conditioned on r_0, s_0, a_0 ... r_t, s_t, a_t
-        h = h.reshape(B, T, 3, self.h_dim).permute(0, 2, 1, 3)
+        h = h.reshape(B, T, 3, self.hidden_dim).permute(0, 2, 1, 3)
 
         # get predictions
         R_preds = self.predict_R(h[:,2])     # predict next rtg given r, s, a

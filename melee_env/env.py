@@ -96,17 +96,14 @@ class MeleeEnv:
 
         self.gamestate = self.console.step()
 
-    def step(self, *actions):
+    def step(self):
         for i, player in enumerate(self.players):
             if player.agent_type == "CPU":
                 continue
-            action = actions[i]
-            control = player.action_space(action)
-            control(player.controller)
 
         if self.gamestate.menu_state in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
             self.gamestate = self.console.step()
-        return self.observation_space(self.gamestate, actions)
+        return self.observation_space(self.gamestate)
 
     def reset(self, stage):
         self.observation_space.reset()
@@ -143,10 +140,8 @@ class MeleeEnv:
 
             elif self.gamestate.menu_state in [melee.Menu.IN_GAME,
                                                melee.Menu.SUDDEN_DEATH]:
-                previous_actions = np.zeros((10, 2), dtype=np.float32)
-                return (self.gamestate, previous_actions), False
+                return self.gamestate, False
                 # game is not done on start
-
             else:
                 melee.MenuHelper.choose_versus_mode(
                     self.gamestate,

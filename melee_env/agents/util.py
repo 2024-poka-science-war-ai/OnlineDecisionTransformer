@@ -2,11 +2,13 @@ import numpy as np
 import melee
 from melee.enums import Action
 from collections import deque
-from parameters import PRE_STATES_NUM
+import math
 
+PRE_STATES_NUM = 4
 
 class ObservationSpace:
-    def __init__(self):
+    def __init__(self, additional_info=False):
+        self.additional_info = additional_info
         self.previous_gamestate = None
         self.current_gamestate = None
         self.previous_gamestates = deque(maxlen=PRE_STATES_NUM)
@@ -63,10 +65,10 @@ class ObservationSpace:
         else:
             reward = (0, 0)
         
-        return reward
+        return reward[0]
 
 
-    def __call__(self, gamestate, actions):
+    def __call__(self, gamestate):
         reward = (0, 0)
         info = None
         self.current_gamestate = gamestate
@@ -88,10 +90,18 @@ class ObservationSpace:
         stocks = np.array(
             [gamestate.players[i].stock for i in list(gamestate.players.keys())]
         )
+        #print("in Obs space, stock is : " ,stocks[np.argsort(stocks)][::-1][1:])
         done = not np.sum(stocks[np.argsort(stocks)][::-1][1:])
-
+        
+        if self.additional_info:
+            return (
+                (gamestate, additional_info),
+                reward,
+                done,
+                info,
+            )
         return (
-            (gamestate, additional_info),
+            gamestate,
             reward,
             done,
             info,
@@ -306,3 +316,49 @@ def from_action_space(act):
         return
 
     return get_action_encoding
+
+def state_processor(s):
+        #print(len(s.players))
+        p1 = s.players[1]
+        p2 = s.players[2]
+
+        state1 = np.zeros((37,), dtype=np.float32)
+
+        state1[0] = p1.position.x
+        state1[1] = p1.position.y
+        state1[2] = p2.position.x
+        state1[3] = p2.position.y
+        state1[4] = p1.position.x - p2.position.x
+        state1[5] = p1.position.y - p2.position.y
+        state1[6] = 1.0 if p1.facing else -1.0
+        state1[7] = 1.0 if p2.facing else -1.0
+        state1[8] = 1.0 if (p1.position.x - p2.position.x) * state1[6] < 0 else -1.0
+        state1[9] = math.log(abs(p1.position.x - p2.position.x) + 1)
+        state1[10] = math.log(abs(p1.position.y - p2.position.y) + 1)
+        state1[11] = p1.hitstun_frames_left
+        state1[12] = p2.hitstun_frames_left
+        state1[13] = p1.invulnerability_left
+        state1[14] = p2.invulnerability_left
+        state1[15] = p1.jumps_left
+        state1[16] = p2.jumps_left
+        state1[17] = p1.off_stage * 1.0
+        state1[18] = p2.off_stage * 1.0
+        state1[19] = p1.on_ground * 1.0
+        state1[20] = p2.on_ground * 1.0
+        state1[21] = p1.percent
+        state1[22] = p2.percent
+        state1[23] = p1.shield_strength
+        state1[24] = p2.shield_strength
+        state1[25] = p1.speed_air_x_self
+        state1[26] = p2.speed_air_x_self
+        state1[27] = p1.speed_ground_x_self
+        state1[28] = p2.speed_ground_x_self
+        state1[29] = p1.speed_x_attack
+        state1[30] = p2.speed_x_attack
+        state1[31] = p1.speed_y_attack
+        state1[32] = p2.speed_y_attack
+        state1[33] = p1.speed_y_self
+        state1[34] = p2.speed_y_self
+        state1[35] = p1.action_frame
+        state1[36] = p2.action_frame
+        return state1

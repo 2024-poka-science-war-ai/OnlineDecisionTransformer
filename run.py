@@ -10,40 +10,39 @@ import time
 import os
 
 parser = argparse.ArgumentParser(description="Example melee-env demonstration.")
-parser.add_argument("--iso", default='ssbm.iso', type=str, help="Path to your NTSC 1.02/PAL SSBM Melee ISO")
+parser.add_argument("--iso", default='../ssbm.iso', type=str, help="Path to your NTSC 1.02/PAL SSBM Melee ISO")
 parser.add_argument("--restore", default=False, type=bool)
-parser.add_argument("--num_ep", default=10)
+parser.add_argument("--num_ep", default=64)
+parser.add_argument("--num_rounds", default=4)
 args = parser.parse_args()
 
 time_str = time.strftime("%y-%m-%d_%H-%M-%S", time.localtime())
-MODEL_PATH = 'melee_PG/model/'
+MODEL_PATH = './models/'
 SAVE_PATH = os.path.join(MODEL_PATH, time_str)
 
 obs_space = ObservationSpace()
 AGENT = OnlineDecisionTransformerAgent(obs_space)
 if args.restore:
     AGENT.load_state_dict(torch.load(os.listdir(MODEL_PATH)[-1]))
-players = [AGENT, Rest()]
+players = [AGENT, Random(character=enums.Character.FOX)]
 
-env = MeleeEnv(args.iso, players, fast_forward=False)
-env.start()
+cnt = 0
 
 for episode in range(args.num_ep):
-    R = 0
-    score = 0
-    gamestate, done = env.setup(enums.Stage.BATTLEFIELD)
+    env = MeleeEnv(args.iso, players, fast_forward=False)
+    env.start()
+    gamestate, done = env.reset(enums.Stage.BATTLEFIELD)
     while not done: 
         players[0].act(gamestate)
         players[1].act(gamestate)
-
-        gamestate, done = env.step()
-    
+        gamestate, reward, done, info = env.step()
     players[0].end_ep()
-    
-    save_path = SAVE_PATH + ".pth"
-    print('Save model state_dict to', save_path)
-    torch.save(players[0].state_dict(), save_path)
+    print(f"# of episode :{episode + 1}")
+    env.close()
+    cnt += 1
 
-    print("# of episode :{}, score : {}".format(episode + 1, score))
-
-env.close()
+    if cnt % args.num_rounds == 0 and cnt > 0:
+        players[0].train()
+        save_path = SAVE_PATH + ".pth"
+        print('Save model state_dict to', save_path)
+        torch.save(players[0].model.state_dict(), save_path)
